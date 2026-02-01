@@ -1,0 +1,21 @@
+syntax = "proto3";
+
+package media;
+
+option go_package = "webrtc-demo/proto;media";
+
+service AIProcessor {
+    rpc ProcessStream (stream MediaPacket) returns (stream MediaPacket);
+}
+
+message MediaPacket {
+    uint64 id = 1;
+    MediaType type = 2;
+    bytes payload = 3;
+}
+
+enum MediaType {
+    UNSPECIFIED = 0;
+    AUDIO = 1;
+    VIDEO = 2;
+}

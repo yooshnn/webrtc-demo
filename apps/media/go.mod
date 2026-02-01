@@ -2,8 +2,6 @@ module webrtc-demo/media
 
 go 1.25.5
 
-replace webrtc-demo/proto => ../../proto
-
 require (
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect

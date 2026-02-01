@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package media;
 
-option go_package = "webrtc-demo/proto;media";
+option go_package = "./proto;media";
 
 service AIProcessor {
     rpc ProcessStream (stream MediaPacket) returns (stream MediaPacket);

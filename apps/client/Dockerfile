@@ -1,22 +1,15 @@
-FROM node:20-alpine AS development-dependencies-env
-COPY . /app
+# Development-only Dockerfile for React Router v7 + Vite
+# Optimized for hot reload with Docker Compose
+
+FROM node:20-alpine AS base
+
+FROM base AS dependencies
 WORKDIR /app
+COPY package.json package-lock.json ./
 RUN npm ci
 
-FROM node:20-alpine AS production-dependencies-env
-COPY ./package.json package-lock.json /app/
+FROM dependencies AS dev
 WORKDIR /app
-RUN npm ci --omit=dev
-
-FROM node:20-alpine AS build-env
-COPY . /app/
-COPY --from=development-dependencies-env /app/node_modules /app/node_modules
-WORKDIR /app
-RUN npm run build
-
-FROM node:20-alpine
-COPY ./package.json package-lock.json /app/
-COPY --from=production-dependencies-env /app/node_modules /app/node_modules
-COPY --from=build-env /app/build /app/build
-WORKDIR /app
-CMD ["npm", "run", "start"]
+# Source code mounted via docker-compose volumes
+# node_modules protected by named volume
+CMD ["npm", "run", "dev", "--", "--host"]

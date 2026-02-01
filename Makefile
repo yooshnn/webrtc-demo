@@ -1,5 +1,5 @@
 PROTO_DIR = proto
-GO_OUT_DIR = proto
+GO_OUT_DIR = apps/media/proto
 PYTHON_OUT_DIR = apps/ai
 PROTO_FILE = $(PROTO_DIR)/media.proto
 
@@ -10,6 +10,7 @@ proto: proto-go proto-python
 
 proto-go:
 	@echo "Generating Go protobuf files..."
+	@mkdir -p $(GO_OUT_DIR)
 	@protoc --proto_path=$(PROTO_DIR) \
 		--go_out=$(GO_OUT_DIR) --go_opt=paths=source_relative \
 		--go-grpc_out=$(GO_OUT_DIR) --go-grpc_opt=paths=source_relative \

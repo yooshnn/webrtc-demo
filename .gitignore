@@ -1,0 +1,27 @@
+.DS_Store
+.vscode/
+*.log
+
+.env
+.env.local
+.env.*
+! .env.example
+
+# client
+node_modules/
+apps/client/.react-router/
+apps/client/build/
+
+# ai
+__pycache__/
+*.py[cod]
+.venv/
+apps/ai/.venv/
+
+# media
+apps/media/bin/
+
+temp_hls/
+**/*.pb.go
+**/*_pb2.py
+**/*_pb2_grpc.py

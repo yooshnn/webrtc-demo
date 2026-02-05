@@ -5,6 +5,8 @@ import (
 	"io"
 	"log"
 	"net/http"
+
+	"github.com/pion/webrtc/v3"
 )
 
 func main() {
@@ -43,6 +45,7 @@ func whipHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 5. SDP Offer 읽기
+	r.Body = http.MaxBytesReader(w, r.Body, 5000)
 	offer, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "Failed to read body", http.StatusBadRequest)
@@ -52,8 +55,58 @@ func whipHandler(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("Received SDP Offer (%d bytes)", len(offer))
 
-	// TODO: Generate SDP Answer via WebRTC PeerConnection
-	answer := "TODO: Generate SDP Answer via WebRTC PeerConnection"
+	// 6. MediaEngine 설정 (코덱 명시적 등록)
+	mediaEngine := &webrtc.MediaEngine{}
+	if err := mediaEngine.RegisterDefaultCodecs(); err != nil {
+		http.Error(w, "Content-Type must be application/sdp", http.StatusUnsupportedMediaType)
+		return
+	}
+
+	// 7. SettingEngine 설정
+	settingEngine := webrtc.SettingEngine{}
+	if err := settingEngine.SetEphemeralUDPPortRange(50000, 50050); err != nil {
+		http.Error(w, "Failed to set UDP port range", http.StatusInternalServerError)
+		log.Printf("UDP port range set failed: %v", err)
+		return
+	}
+
+	// 8. API 객체 생성 (MediaEngine + SettingEngine)
+	api := webrtc.NewAPI(
+		webrtc.WithMediaEngine(mediaEngine),
+		webrtc.WithSettingEngine(settingEngine),
+	)
+
+	// 9. ICE 서버 설정 (STUN)
+	config := webrtc.Configuration{
+		ICEServers: []webrtc.ICEServer{
+			{
+				URLs: []string{"stun:stun.l.google.com:19302"},
+			},
+		},
+	}
+
+	// 10. PeerConnection 생성
+	peerConnection, err := api.NewPeerConnection(config)
+	if err != nil {
+		http.Error(w, "Failed to create PeerConnection", http.StatusInternalServerError)
+		log.Printf("PeerConnection creation failed: %v", err)
+		return
+	}
+
+	// 11. Remote Description 설정
+	if err := peerConnection.SetRemoteDescription(webrtc.SessionDescription{
+		Type: webrtc.SDPTypeOffer,
+		SDP:  string(offer),
+	}); err != nil {
+		http.Error(w, "Failed to set remote description", http.StatusBadRequest)
+		log.Printf("SetRemoteDescription failed: %v", err)
+		peerConnection.Close()
+		return
+	}
+
+	log.Println("PeerConnection created and remote description set")
+
+	answer := "TODO: Generate SDP Answer via CreateAnswer"
 
 	w.Header().Set("Content-Type", "application/sdp")
 	w.Header().Set("Location", "/whip/session-id")

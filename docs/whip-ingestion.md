@@ -166,6 +166,153 @@ curl -i -X POST http://localhost:8080/whip \
   -d "v=0..."
 ```
 
+기본적인 HTTP 핸들러 구현이 완료되었다. 다음 단계로 **WebRTC PeerConnection**를 활용해, 실제 SDP를 주고받는 과정을 구현해 보자.
+
 ---
 
-기본적인 HTTP 핸들러 구현이 완료되었다. 다음 단계로 **WebRTC PeerConnection**를 활용해, 실제 SDP 명함을 주고받는 과정을 구현해 보자.
+## 2. PeerConnection 생성
+
+HTTP 핸들러라는 '문'을 만들었으니, 이제 그 안에서 실제로 미디어를 처리할 '엔진'을 돌릴 차례다. WebRTC의 핵심 객체인 **PeerConnection**을 생성하고, 클라이언트와 협상하는 과정을 단계별로 구현해 보자.
+
+### 2.1 MediaEngine: 코덱의 언어 맞추기
+
+WebRTC 연결의 첫 단추는 코덱 협상(Codec Negotiation)이다. 클라이언트와 서버가 서로 어떤 영상/음성 포맷을 쓸지 합의해야 하는데, 이를 관리하는 것이 MediaEngine이다.
+
+서버가 지원하는 코덱 목록을 명시적으로 등록하지 않으면, 코덱 불일치로 인해 연결이 즉시 실패할 수 있다. 이는 WebRTC의 표준인 [JSEP(RFC 8829)](https://datatracker.ietf.org/doc/html/rfc8829#section-3.2)의 협상 방식에 때문이다.
+
+WebRTC 협상은 양측이 제시한 코덱 목록의 교집합을 찾는 과정이다. 서버의 MediaEngine이 비어 있다면, 클라이언트가 무엇을 제안하더라도 서버가 이를 처리할 수 없다고 판단하여 미디어 전송 자체가 거부된다.
+
+또한 WebRTC의 코덱 협상은 단순히 코덱 이름(H.264 등)만 일치한다고 성립하지 않는다. profile-level-id나 packetization-mode 같은 세부 파라미터까지 정확히 일치해야 동일한 코덱으로 간주된다.
+
+마지막으로, Pion 라이브러리는 명시적 등록 방식을 지향한다. 사용하지 않는 코덱을 암묵적으로 활성화하면 불필요한 처리 로직이 시스템 자원을 낭비할 수 있기 때문에, 실제 사용할 코덱만 등록하여 효율적인 미디어 파이프라인을 구성한다.
+
+```go
+    // 6. MediaEngine 설정 (코덱 등록)
+    mediaEngine := &webrtc.MediaEngine{}
+    if err := mediaEngine.RegisterDefaultCodecs(); err != nil {
+        http.Error(w, "Failed to register codecs", http.StatusInternalServerError)
+        return
+    }
+```
+
+### 2.2 SettingEngine
+
+MediaEngine이 무엇(What)을 지원할지 정의한다면, SettingEngine은 그 기능들이 실제 네트워크 환경에서 어떻게(How) 동작할지 정의한다.
+
+이 서버는 Docker 컨테이너 위에서 실행할 예정인데, WebRTC는 미디어 전송을 위해 동적으로 선택된 UDP 포트를 사용한다. 반면 Docker는 컨테이너 외부에서 접근할 수 있는 포트를 사전에 명시적으로 개방(Port Forwarding) 해야 한다.
+
+물론 넓은 범위의 포트를 모두 개방할 수도 있지만 비효율적이므로, **SettingEngine**을 사용해 WebRTC가 사용할 UDP 포트의 범위를 제한할 수 있다.
+
+이제 `MediaEngine`과 `SettingEngine`을 하나로 묶어 WebRTC API 객체를 생성할 수 있다. Pion은 하나의 프로세스 안에서도 서로 다른 설정을 가진 API 인스턴스를 여러 개 생성할 수 있도록 설계되어 있다.이 API 객체를 통해 생성되는 모든 PeerConnection은 우리가 설정한 코덱과 포트 규칙을 따르게 된다.
+
+```go
+    // 7. SettingEngine 설정
+    settingEngine := webrtc.SettingEngine{}
+    if err := settingEngine.SetEphemeralUDPPortRange(50000, 50050); err != nil {
+        http.Error(w, "Failed to set UDP port range", http.StatusInternalServerError)
+        return
+    }
+
+    // 8. API 객체 생성
+    api := webrtc.NewAPI(
+        webrtc.WithMediaEngine(mediaEngine),
+        webrtc.WithSettingEngine(settingEngine),
+    )
+```
+
+### 2.3 API 객체 및 ICE 설정
+
+WebRTC에서 서로 다른 네트워크에 있는 피어가 통신하려면, 먼저 서로에게 도달 가능한 주소(candidate)를 알아내야 한다. 이 과정은 ICE(Interactive Connectivity Establishment)의 첫 단계로, 각 피어는 자신에게 도달 가능한 여러 주소를 수집하고 교환한다.
+
+NAT 뒤에 있는 호스트는 자신의 공인 IP와 포트를 직접 알 수 없다. NAT가 내부 호스트의 주소를 외부 주소로 변환하면서 그 정보를 내부 프로그램에 알려주지 않기 때문이다. 특히 모바일 네트워크나 클라우드 환경에서는 여러 단계의 NAT를 거치기도 한다. 따라서 우리의 서버와 같은 애플리케이션이 자신의 외부 주소를 직접 예측하는 것은 불가능에 가깝다.
+
+이 문제를 해결하기 위해 STUN 서버를 사용한다. 서버는 STUN 서버에 요청을 보내 "외부에서 보이는 나의 공인 주소는 무엇인가?"를 확인하고, 이 정보를 기반으로 클라이언트와 연결 경로를 찾는다.
+
+이제 서버가 자신의 공인 주소를 확인할 수 있도록 STUN 서버 정보를 ICE 설정에 추가한다. 이 설정은 ICE candidate gathering 과정에서 사용되며, 이후 생성되는 PeerConnection은 이 STUN 서버를 이용해 외부에서 도달 가능한 주소를 수집하게 된다.
+
+*참고: 참고로 WHIP은 P2P가 아닌 클라이언트-서버 구조이고 서버의 포트(50000-50050)가 개방되어 있으므로, TURN 서버는 구성하지 않는다.*
+
+```go
+    // 9. ICE 서버 설정 (STUN)
+    // 편의를 위해 Google에서 제공하는 공개 STUN 서버를 사용한다.
+    config := webrtc.Configuration{
+        ICEServers: []webrtc.ICEServer{
+            {
+                URLs: []string{"stun:stun.l.google.com:19302"},
+            },
+		},
+	}
+```
+
+### 2.4 PeerConnection 생성 및 Offer 적용
+
+드디어 **PeerConnection**을 생성하고, 클라이언트가 보낸 SDP Offer를 적용할 차례다.
+
+`SetRemoteDescription`을 호출하면 서버는 SDP 문자열을 파싱하여 상대 피어가 지원하는 코덱, 미디어 설정, 네트워크 경로 정보를 파악하고 내부적으로 연결 준비를 시작한다.
+
+> **주의:** 여기서 `defer peerConnection.Close()`를 호출하면 안 된다. HTTP 요청 처리가 끝나더라도 WebRTC 연결은 이후에도 계속 유지되어야 하기 때문이다. 연결 종료는 추후 `ConnectionStateChange` 이벤트 등에서 명시적으로 처리해야 한다.
+
+```go
+    // 10. PeerConnection 생성
+    peerConnection, err := api.NewPeerConnection(config)
+    if err != nil {
+        http.Error(w, "Failed to create PeerConnection", http.StatusInternalServerError)
+        log.Printf("PeerConnection creation failed: %v", err)
+        return
+    }
+
+    // 11. Remote Description 설정 (SDP Offer 적용)
+    // 클라이언트가 보낸 SDP를 서버에 적용한다.
+    // 이 과정에서 코덱 협상과 ICE 절차가 시작될 준비가 이루어진다.
+    if err := peerConnection.SetRemoteDescription(webrtc.SessionDescription{
+        Type: webrtc.SDPTypeOffer,
+        SDP:  string(offer),
+    }); err != nil {
+        http.Error(w, "Failed to set remote description", http.StatusBadRequest)
+        log.Printf("SetRemoteDescription failed: %v", err)
+        peerConnection.Close() // 에러 발생 시 리소스 정리
+        return
+    }
+
+    log.Println("PeerConnection created and remote description set")
+```
+
+### 2.5 테스트
+
+작성한 WebRTC 엔진이 정상적으로 시동이 걸리는지 확인해 보자. 이번 테스트의 핵심은 **"서버가 클라이언트의 SDP Offer를 거부하지 않고 `SetRemoteDescription`을 성공하느냐"** 이다.
+
+먼저 서버를 실행한다.
+
+```bash
+go run main.go
+```
+
+#### SDP Offer 시뮬레이션
+
+WebRTC 연결을 맺으려면 문법에 맞는 SDP가 필요하다. 아래는 H.264 비디오 코덱을 사용하겠다고 선언하는 최소한의 SDP 예시다. 이 내용을 `curl`을 이용해 서버로 전송해 보자.
+
+서버가 `201 Created`를 반환했다면, 다음 세 가지가 모두 정상 작동했음을 의미한다.
+
+1. `MediaEngine`이 정상적으로 초기화되어 H.264 코덱을 인식했다.
+2. `SettingEngine`이 포트 범위를 문제없이 설정했다.
+3. 클라이언트가 보낸 SDP가 서버 설정과 일치(교집합)하여 `SetRemoteDescription`을 통과했다.
+
+```bash
+curl -i -X POST http://localhost:8080/whip \
+  -H "Content-Type: application/sdp" \
+  --data-binary "v=0
+o=- 0 0 IN IP4 127.0.0.1
+s=-
+c=IN IP4 127.0.0.1
+t=0 0
+m=video 5004 UDP/TLS/RTP/SAVPF 96
+a=mid:0
+a=ice-ufrag:testiceufrag
+a=ice-pwd:testicepwd
+a=rtpmap:96 H264/90000
+a=fmtp:96 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42001f
+a=fingerprint:sha-256 00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00
+"
+```
+
+여기까지 진행했다면 서버는 클라이언트의 제안을 받아들일 준비를 마쳤다. 하지만 아직 우리의 "답장(Answer)"을 보내지 않았기에 연결은 대기 상태다. 이제 다음 단계에서 SDP Answer 생성과 실제 미디어 트랙 처리를 시작해 보자.

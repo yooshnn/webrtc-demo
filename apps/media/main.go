@@ -106,12 +106,36 @@ func whipHandler(w http.ResponseWriter, r *http.Request) {
 
 	log.Println("PeerConnection created and remote description set")
 
-	answer := "TODO: Generate SDP Answer via CreateAnswer"
+	// 12. SDP Answer 생성
+	answer, err := peerConnection.CreateAnswer(nil)
+	if err != nil {
+		http.Error(w, "Failed to create answer", http.StatusInternalServerError)
+		log.Printf("CreateAnswer failed: %v", err)
+		peerConnection.Close()
+		return
+	}
+
+	// 13. ICE Candidate 수집 대기 준비 (Full ICE Mode)
+	gatherComplete := webrtc.GatheringCompletePromise(peerConnection)
+
+	// 14. Local Description 설정
+	if err := peerConnection.SetLocalDescription(answer); err != nil {
+		http.Error(w, "Failed to set local description", http.StatusInternalServerError)
+		log.Printf("SetLocalDescription failed: %v", err)
+		peerConnection.Close()
+		return
+	}
+
+	// 15. Gathering 완료 대기
+	<-gatherComplete
+
+	// 16. 최종 Answer 반환
+	finalAnswer := peerConnection.LocalDescription()
 
 	w.Header().Set("Content-Type", "application/sdp")
-	w.Header().Set("Location", "/whip/session-id")
+	w.Header().Set("Location", "/whip/session-uuid")
 	w.WriteHeader(http.StatusCreated)
-	fmt.Fprint(w, answer)
+	fmt.Fprint(w, finalAnswer.SDP)
 
-	log.Println("WHIP handler completed (answer placeholder)")
+	log.Println("WHIP handler completed: Answer sent")
 }
